@@ -1,0 +1,156 @@
+import csv
+import pickle
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+print("Cargando asl_landmarks_final.csv...")
+
+X = []
+y = []
+
+try:
+    with open("asl_landmarks_final.csv", mode="r") as f:
+        reader = csv.reader(f)
+        encabezado = next(reader)
+        
+        for fila in reader:
+            if not fila or len(fila) < 64:
+                continue
+            try:
+                raw_coords = [float(val) for val in fila[:-1]]
+                etiqueta = str(fila[-1]).strip()
+
+                base_x, base_y, base_z = raw_coords[0], raw_coords[1], raw_coords[2]
+                
+                coords_relativas = []
+                for i in range(0, len(raw_coords), 3):
+                    coords_relativas.extend([
+                        raw_coords[i] - base_x,
+                        raw_coords[i+1] - base_y,
+                        raw_coords[i+2] - base_z
+                    ])
+
+                max_val = max(abs(val) for val in coords_relativas)
+                if max_val == 0:
+                    max_val = 1.0
+
+                coords_norm = [v / max_val for v in coords_relativas]
+
+                X.append(coords_norm)
+                y.append(etiqueta)
+            except ValueError:
+                continue
+
+except FileNotFoundError:
+    print("Error: No se encontró 'asl_landmarks_final.csv'")
+    exit()
+
+print(f"Total muestras cargadas: {len(X)}")
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+
+print("Entrenando RandomForest equilibrado...")
+clf = RandomForestClassifier(n_estimators=250, max_depth=30, class_weight="balanced", random_state=42)
+clf.fit(X_train, y_train)
+
+precision = clf.score(X_test, y_test)
+print(f"Precisión obtenida: {precision * 100:.2f}%")
+
+with open("modelo_gestos.pkl", "wb") as f:
+    pickle.dump(clf, f)
+
+print("¡Modelo 'modelo_gestos.pkl' exitoso!")
+
+
+
+import cv2
+from reconocimiento import ReconocidorEstatico
+from traductores import TraductorTexto, TraductorVoz
+from modelos import ModeloClasificador
+
+def ejecutar_sistema():
+    
+    reconocedor = ReconocidorEstatico()
+    clasificador = ModeloClasificador()
+    traductor_texto = TraductorTexto()
+    traductor_voz = TraductorVoz()
+
+    print("--- PROYECTO SEÑA ---")
+    print("Presiona 't' para traducir texto en consola.")
+    print("Presiona 'v' para reproducir voz.")
+    print("Presiona 'q' para salir.")
+
+    while True:
+        frame, manos = reconocedor.procesar()
+
+        if frame is None:
+            print("No se pudo acceder a la cámara.")
+            break
+
+        seña_actual = clasificador.clasificar_gesto(manos)
+
+        cv2.putText(frame, f"Estado: {seña_actual}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+        cv2.imshow("Proyecto SEÑA - Reconocimiento y Voz", frame)
+
+        tecla = cv2.waitKey(1) & 0xFF
+        if tecla == ord('q'):
+            break
+        elif tecla == ord('t'):
+            traductor_texto.traducir(seña_actual)
+        elif tecla == ord('v'):
+            traductor_voz.traducir(seña_actual)
+
+    reconocedor.cerrar()
+
+if __name__ == "__main__":
+    ejecutar_sistema()
+
+
+
+import cv2
+import mediapipe as mp
+
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+
+class ReconocedordeSeñas:
+    def __init__(self):
+        self.camara = cv2.VideoCapture(0)
+        self.mp_manos = mp_hands
+        self.manos = self.mp_manos.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.7
+        )
+        self.mp_dibujo = mp_drawing
+
+    def capturar_frame(self):
+        exito, frame = self.camara.read()
+        return frame if exito else None
+
+    def cerrar(self):
+        self.camara.release()
+        cv2.destroyAllWindows()
+
+class ReconocidorEstatico(ReconocedordeSeñas):
+    def procesar(self):
+        frame = self.capturar_frame()
+        if frame is None:
+            return None, []
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resultado = self.manos.process(frame_rgb)
+
+        landmarks_detectados = []
+        if resultado.multi_hand_landmarks:
+            for mano in resultado.multi_hand_landmarks:
+                self.mp_dibujo.draw_landmarks(frame, mano, self.mp_manos.HAND_CONNECTIONS)
+                landmarks_detectados.append(mano)
+
+        return frame, landmarks_detectados
+
+
+
